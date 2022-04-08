@@ -4,8 +4,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -14,18 +16,10 @@ import (
 var db *sql.DB
 
 type Todo struct {
-	Title        string `json:"title"`
-	IsDone       bool
-	CreationDate time.Time
-}
-
-func AddTodo(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		fmt.Fprintf(w, "Request method is not acceptable")
-		log.Printf("AddTodo Handler: can't handle %v method instead of POST", r.Method)
-		return
-	}
-
+	Id           int64     `json:"id"`
+	Title        string    `json:"title"`
+	IsDone       bool      `json:"isDone,omitempty"`
+	CreationDate time.Time `json:"creationDate"`
 }
 
 func CheckErr(err error) {
@@ -37,13 +31,7 @@ func CheckErr(err error) {
 func AddTodoToDatabase(todo Todo) sql.Result {
 	stmt, err := db.Prepare("INSERT INTO todo(title, done, createTime) values (?, ?, ?)")
 	CheckErr(err)
-	var isDone int
-	if todo.IsDone {
-		isDone = 1
-	} else {
-		isDone = 0
-	}
-	res, err := stmt.Exec(todo.Title, isDone, todo.CreationDate.Unix())
+	res, err := stmt.Exec(todo.Title, todo.IsDone, todo.CreationDate.Unix())
 	CheckErr(err)
 	return res
 }
@@ -113,11 +101,47 @@ func HandleTodoPost(w http.ResponseWriter, r *http.Request) {
 
 	todo.IsDone = false
 	todo.CreationDate = time.Now()
-	AddTodoToDatabase(todo)
+	res := AddTodoToDatabase(todo)
+
+	id, err := res.LastInsertId()
+	if err != nil {
+		http.Error(w, `{"error": 500, "message": "could not insert data"}`, http.StatusServiceUnavailable)
+		return
+	}
+	todo.Id = id
+
+	a, _ := json.Marshal(todo)
+	w.Header().Add("Content-Type", "application/json")
+	fmt.Fprint(w, string(a))
 }
 
 func HandleTodoPut(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Content-Type", "application/json")
+	var todo Todo
+	var qtodo Todo
+	qtodo.Id = -1
 
+	rm, _ := ioutil.ReadAll(r.Body)
+	reader := strings.NewReader(string(rm))
+
+	decoder := json.NewDecoder(reader)
+	decoder.DisallowUnknownFields()
+	decoder.Decode(&todo)
+
+	db.QueryRow(`SELECT id, title, done, createTime FROM todo WHERE id = ?`, todo.Id).Scan(&qtodo.Id, &qtodo.Title, &qtodo.IsDone, &qtodo.CreationDate)
+
+	if qtodo.Id == -1 {
+		http.Error(w, `{"error": 400, "message": "todo id not found"}`, http.StatusBadRequest)
+		return
+	}
+
+	reader = strings.NewReader(string(rm))
+	decoder = json.NewDecoder(reader)
+	decoder.Decode(&qtodo)
+
+	db.Exec(`UPDATE todo SET done = ?, title = ? WHERE id = ?`, qtodo.IsDone, qtodo.Title, qtodo.Id)
+	a, _ := json.Marshal(qtodo)
+	fmt.Fprint(w, string(a))
 }
 
 func HandleTodoDelete(w http.ResponseWriter, r *http.Request) {
